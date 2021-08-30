@@ -4,11 +4,12 @@ use druid::{AppLauncher, Data, Env, Lens, LocalizedString, Menu, Widget, WidgetE
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::mpsc;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
+use std::fs;
 
 const WIDGET_SPACING: f64 = 20.0;
-const TEXT_BOX_WIDTH: f64 = 200.0;
+const TEXT_BOX_WIDTH: f64 = 300.0;
 const WINDOW_TITLE: LocalizedString<MultiStream> = LocalizedString::new("Multi-Streamer!");
 
 //Architecture:
@@ -21,7 +22,9 @@ const WINDOW_TITLE: LocalizedString<MultiStream> = LocalizedString::new("Multi-S
 struct MultiStream {
     status: String,
     url: String,
+    name: String,
     tx: Rc<Sender<String>>,
+    rx: Rc<Receiver<String>>,
 }
 
 fn main() {
@@ -29,20 +32,35 @@ fn main() {
     let main_window = WindowDesc::new(build_root_widget())
         .title(WINDOW_TITLE)
         .menu(|_op, _t, _env| Menu::empty().entry(platform_menus::mac::application::default()))
-        .window_size((600.0, 100.0));
+        .window_size((600.0, 200.0));
 
-    let (tx, rx) = mpsc::channel();
+    let (tx_gui, rx_gui) = mpsc::channel();
+    let (tx_worker, rx_worker) = mpsc::channel();
 
     // create the initial app state
     let initial_state = MultiStream {
         url: "".into(),
+        name: "".into(),
         status: "Enter a URL above!".into(),
-        tx: Rc::new(tx),
+        tx: Rc::new(tx_gui),
+        rx: Rc::new(rx_worker),
     };
 
     thread::spawn(move || {
-        for msg in rx.into_iter() {
-            println!("Second thread: {}", msg);
+        for msg in rx_gui.into_iter() {
+            //-j / -json for outputing json shaped text (maybe useful?)
+            // --url can be used to specify the url
+            // --logfile useful for activity, can be set to default file via '-'
+
+            let msg_parts = msg.split(",").collect::<Vec<&str>>();
+            Command::new("streamlink")
+                // .current_dir(home)
+                .arg("-r")
+                .arg(format!("{}.ts", msg_parts[1]))
+                .arg(msg_parts[0])
+                .arg("best")
+                .spawn()
+                .expect("failed to execute command");
         }
     });
 
@@ -54,27 +72,37 @@ fn main() {
 }
 
 fn build_root_widget() -> impl Widget<MultiStream> {
-    // a textbox that modifies `name`.
-    let textbox = TextBox::new()
-        .with_placeholder("Who are we greeting?")
+    // a urlbox that modifies `name`.
+    let urlbox = TextBox::new()
+        .with_placeholder("URL?")
         .fix_width(TEXT_BOX_WIDTH)
         .lens(MultiStream::url);
 
+    let filebox = TextBox::new()
+        .with_placeholder("name?")
+        .fix_width(TEXT_BOX_WIDTH)
+        .lens(MultiStream::name);
+
     let button = Button::new("Pull Stream").on_click(|_ctx, data: &mut MultiStream, _env| {
         data.status = format!("Pulling '{}'", data.url);
-        data.tx.send(data.url.to_owned()).unwrap()
+        let msg = data.url.to_owned() + "," + &data.name.to_owned();
+        data.tx.send(msg).unwrap();
     });
-    //https://www.youtube.com/watch?v=qY8_1t8LDWY
     let label = Label::new(|data: &MultiStream, _env: &Env| format!("{}", data.status));
 
     // arrange the two widgets vertically, with some padding
     let layout = Flex::column()
-        .with_child(Align::centered(
+        .with_child(
             Flex::row()
-                .with_child(textbox)
+                .with_child(Align::centered(
+                    Flex::column()
+                        .with_child(urlbox)
+                        .with_spacer(WIDGET_SPACING)
+                        .with_child(filebox),
+                ))
                 .with_spacer(WIDGET_SPACING)
                 .with_child(button),
-        ))
+        )
         .with_spacer(WIDGET_SPACING)
         .with_child(label);
 
